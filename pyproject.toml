@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eumech-turtle"
+version = "0.1.0"
+description = "Standalone EuMech trace turtle viewer"
+readme = "README.md"
+requires-python = ">=3.9"
+
+[project.scripts]
+eumech-turtle = "eumech_turtle_viewer:main"
+
+[tool.setuptools]
+py-modules = ["eumech_turtle_viewer"]
