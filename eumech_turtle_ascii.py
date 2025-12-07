@@ -2,13 +2,23 @@
 """
 EuMech Turtle Viewer — ASCII / terminal mode
 
-Usage (after `pip install .`):
-    eumech-turtle-ascii --trace trace.json
+Usage:
+    python eumech_turtle_ascii.py --trace file.json [options]
 
-This does NOT use tkinter/turtle. It:
-  - loads a EuMech trace
-  - projects coords to a terminal-sized grid
-  - animates the turtle as '@' with trail '.'
+Supports:
+  1. Kernel Traces:
+        { "states": [ {"coords": [x, y, ...], "step": n}, ... ] }
+
+  2. X-Mode Spiral Traces:
+        {
+          "triangles": [
+             {"coords": [x1,y1,x2,y2,x3,y3], "step": n},
+             ...
+          ]
+        }
+
+In X-mode traces, each triangle is reduced to its *centroid*
+so the viewer plots a single turtle path.
 """
 
 import argparse
@@ -21,46 +31,104 @@ from typing import Any, Dict, List, Tuple, Union
 State = Dict[str, Any]
 
 
+# ---------------------------------------------------------------------------
+# TRACE LOADER — supports kernel traces & X-mode spiral traces
+# ---------------------------------------------------------------------------
 def load_trace(path: Union[str, Path]) -> List[State]:
-    """Load a EuMech trace from JSON (same format as GUI viewer)."""
+    """Load a EuMech trace from JSON and return states with coords[0:2].
+
+    Allowed formats:
+
+    1. {"states": [ {...}, ... ]}
+       → coords[0], coords[1] are used directly
+
+    2. {"triangles": [ {...}, ... ]}
+       → convert each triangle to centroid (x,y)
+
+    3. [ {...}, ... ]
+       → treated as states already
+    """
     path = Path(path)
     with path.open("r", encoding="utf-8") as f:
         data = json.load(f)
 
+    # -----------------------------------------------------
+    # CASE 1: kernel-style {"states": [...]}
+    # -----------------------------------------------------
     if isinstance(data, dict) and "states" in data:
         states = data["states"]
+
+    # -----------------------------------------------------
+    # CASE 2: X-mode-style {"triangles": [...]}
+    # -----------------------------------------------------
+    elif isinstance(data, dict) and "triangles" in data:
+        triangles = data["triangles"]
+        if not isinstance(triangles, list):
+            raise ValueError("'triangles' must be a list.")
+
+        states = []
+        for idx, tri in enumerate(triangles):
+            if "coords" not in tri:
+                raise ValueError(f"Triangle {idx} missing 'coords'.")
+            coords = tri["coords"]
+
+            if not isinstance(coords, list) or len(coords) < 6:
+                raise ValueError(
+                    f"Triangle {idx} has invalid 'coords' — expected at least 6 numbers."
+                )
+
+            # Extract first triangle only (3 vertices)
+            x1, y1, x2, y2, x3, y3 = coords[:6]
+
+            # Compute centroid
+            cx = (x1 + x2 + x3) / 3.0
+            cy = (y1 + y2 + y3) / 3.0
+
+            step = tri.get("step", idx)
+            states.append({"step": step, "coords": [cx, cy]})
+
+    # -----------------------------------------------------
+    # CASE 3: raw list
+    # -----------------------------------------------------
     elif isinstance(data, list):
         states = data
+
     else:
         raise ValueError(
-            "Unrecognized trace format. Expected list or object with 'states' key."
+            "Unrecognized trace format.\n"
+            "Expected:\n"
+            "  - list\n"
+            "  - object with 'states'\n"
+            "  - object with 'triangles'"
         )
 
-    cleaned: List[State] = []
+    # -----------------------------------------------------
+    # VALIDATE STATES
+    # -----------------------------------------------------
+    cleaned = []
     for idx, s in enumerate(states):
         if "coords" not in s:
             raise ValueError(f"State {idx} missing 'coords'.")
         coords = s["coords"]
         if not isinstance(coords, list) or len(coords) < 2:
-            raise ValueError(
-                f"State {idx} has invalid 'coords': need at least [x, y]."
-            )
+            raise ValueError(f"State {idx}: coords must contain at least [x, y].")
         cleaned.append(s)
 
     if not cleaned:
-        raise ValueError("Trace contains no states.")
+        raise ValueError("Trace produced no usable states.")
+
     return cleaned
 
 
+# ---------------------------------------------------------------------------
+# PROJECTION + VIEWER
+# ---------------------------------------------------------------------------
 def compute_bounds(states: List[State], scale: float) -> Tuple[float, float, float, float]:
-    """Return (min_x, max_x, min_y, max_y) after scaling."""
-    xs: List[float] = []
-    ys: List[float] = []
+    xs = []
+    ys = []
     for s in states:
-        x = s["coords"][0] * scale
-        y = s["coords"][1] * scale
-        xs.append(x)
-        ys.append(y)
+        xs.append(s["coords"][0] * scale)
+        ys.append(s["coords"][1] * scale)
     return min(xs), max(xs), min(ys), max(ys)
 
 
@@ -71,7 +139,6 @@ def project_point(
     width: int,
     height: int,
 ) -> Tuple[int, int]:
-    """Project (x,y) in world coords into integer grid coords."""
     min_x, max_x, min_y, max_y = bounds
 
     if max_x == min_x:
@@ -79,16 +146,15 @@ def project_point(
     if max_y == min_y:
         max_y = min_y + 1.0
 
-    nx = (x - min_x) / (max_x - min_x)  # 0..1
-    ny = (y - min_y) / (max_y - min_y)  # 0..1
+    nx = (x - min_x) / (max_x - min_x)
+    ny = (y - min_y) / (max_y - min_y)
 
     gx = int(nx * (width - 1))
-    gy = int((1.0 - ny) * (height - 1))  # invert y for screen coordinates
+    gy = int((1.0 - ny) * (height - 1))  # inverted y
     return gx, gy
 
 
 def clear_screen() -> None:
-    """ANSI clear + home."""
     print("\x1b[2J\x1b[H", end="")
 
 
@@ -99,23 +165,21 @@ def draw_frame(
     turtle_pos: Tuple[int, int],
     step: int,
 ) -> None:
-    """Render one frame of the ASCII world to the terminal."""
     clear_screen()
 
     grid = [[" " for _ in range(width)] for _ in range(height)]
 
-    # trail as '.'
+    # Draw trail
     for j in range(height):
         for i in range(width):
             if trail[j][i]:
                 grid[j][i] = "."
 
-    # turtle as '@'
+    # Draw turtle
     tx, ty = turtle_pos
     if 0 <= tx < width and 0 <= ty < height:
         grid[ty][tx] = "@"
 
-    # print grid
     for row in grid:
         print("".join(row))
 
@@ -131,16 +195,13 @@ def ascii_run(
     max_height: int,
     skip: int,
 ) -> None:
-    """Main animation loop."""
-    # terminal size
+
     term_cols, term_rows = shutil.get_terminal_size((80, 24))
     width = min(max_width, term_cols)
-    # reserve 2 rows for status
     height = min(max_height, max(4, term_rows - 2))
 
     bounds = compute_bounds(states, scale)
 
-    # trail grid
     trail = [[False for _ in range(width)] for _ in range(height)]
 
     for idx, state in enumerate(states):
@@ -151,7 +212,6 @@ def ascii_run(
         y = state["coords"][1] * scale
         gx, gy = project_point(x, y, bounds, width, height)
 
-        # mark trail
         if 0 <= gx < width and 0 <= gy < height:
             trail[gy][gx] = True
 
@@ -162,66 +222,43 @@ def ascii_run(
         draw_frame(width, height, trail, (gx, gy), step)
         time.sleep(delay)
 
+    # Final static render
     if static_only:
-        # final static frame
-        gx, gy = project_point(
-            states[-1]["coords"][0] * scale,
-            states[-1]["coords"][1] * scale,
-            bounds,
-            width,
-            height,
-        )
+        x = states[-1]["coords"][0] * scale
+        y = states[-1]["coords"][1] * scale
+        gx, gy = project_point(x, y, bounds, width, height)
         step = states[-1].get("step", len(states) - 1)
         draw_frame(width, height, trail, (gx, gy), step)
 
 
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="EuMech Turtle Viewer — ASCII / terminal"
     )
     parser.add_argument(
-        "--trace",
-        "-t",
+        "--trace", "-t",
         required=True,
-        help="Path to EuMech trace.json file",
+        help="Path to EuMech trace.json (kernel or X-mode)",
     )
     parser.add_argument(
-        "--scale",
-        "-s",
+        "--scale", "-s",
         type=float,
         default=1.0,
-        help="Scale factor for coords → world (default: 1.0)",
+        help="World scaling factor",
     )
     parser.add_argument(
-        "--delay",
-        "-d",
+        "--delay", "-d",
         type=float,
         default=0.05,
-        help="Delay between frames in seconds (default: 0.05)",
+        help="Animation delay",
     )
-    parser.add_argument(
-        "--static",
-        action="store_true",
-        help="Do not animate; render only final path.",
-    )
-    parser.add_argument(
-        "--max-width",
-        type=int,
-        default=80,
-        help="Maximum grid width (default: 80)",
-    )
-    parser.add_argument(
-        "--max-height",
-        type=int,
-        default=24,
-        help="Maximum grid height (default: 24)",
-    )
-    parser.add_argument(
-        "--skip",
-        type=int,
-        default=1,
-        help="Only draw every Nth state (default: 1 = all states)",
-    )
+    parser.add_argument("--static", action="store_true", help="Render final result only.")
+    parser.add_argument("--max-width", type=int, default=80)
+    parser.add_argument("--max-height", type=int, default=24)
+    parser.add_argument("--skip", type=int, default=1)
     return parser.parse_args()
 
 
@@ -241,3 +278,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
