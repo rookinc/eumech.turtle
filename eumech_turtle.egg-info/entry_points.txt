@@ -1,0 +1,3 @@
+[console_scripts]
+eumech-turtle = eumech_turtle_viewer:main
+eumech-turtle-ascii = eumech_turtle_ascii:main
